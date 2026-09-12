@@ -18,8 +18,9 @@ echo "   Username = GitHubユーザー名"
 echo "   Password = 作成したトークン(PAT)を貼り付け（画面には出ません）"
 echo ""
 git push -u origin main
+code=$?
 echo ""
-if [ $? -eq 0 ]; then
+if [ $code -eq 0 ]; then
   echo "✅ アップロード成功！"
   echo "   次に GitHub の Settings → Pages で公開してください（手順書参照）。"
 else
