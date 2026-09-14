@@ -476,7 +476,7 @@
   // supplier: 購入先 / spec: 規格・メモ / url: 商品ページ（空ならsupplierで検索）
   const A = "Amazon", R = "楽天市場", T = "髙木商会", B = "バルクオム";
   const SEED_PRODUCTS = [
-    { name:"リンレイ R'S PRO強力バスクリーナー 4L", supplier:A, spec:"4L 強力バスクリーナー", url:"https://amzn.asia/d/011gEz5Z" },
+    { name:"リンレイ R'S PRO強力バスクリーナー 4L", supplier:A, spec:"4L 強力バスクリーナー", url:"https://amzn.asia/d/011gEz5Z", asin:"B00CDG316Y" },
     { name:"シェービングフォーム（シック）", supplier:A, spec:"シック薬用シェーブガード メントール お得用 415g×3" },
     { name:"花王 マイペット 4.5L", supplier:A, spec:"うすめて使える 業務用 ホール用洗剤" },
     { name:"バスマジックリン 4.5L", supplier:A, spec:"黄色 4.5L 浴室用洗剤 花王" },
@@ -510,7 +510,7 @@
     { name:"防錆スプレー", supplier:A, spec:"プロスタッフ Fusso 320ml D-64 無香性（2025.4.8 商品変更）" },
     { name:"クレ556", supplier:A, spec:"KURE 5-56 DX 420ml 防錆潤滑剤 1401" },
     { name:"吸い殻用ゴミ袋", supplier:A, spec:"オルディ ポリ袋 ひも付 11号 30×20cm 200枚 BPN11H" },
-    { name:"ビオレu 泡ハンドソープ 詰替 1.5L", supplier:A, spec:"1.5L マイルドシトラスの香り", url:"https://amzn.asia/d/hNqnr7u" },
+    { name:"ビオレu 泡ハンドソープ 詰替 1.5L", supplier:A, spec:"1.5L マイルドシトラスの香り", url:"https://amzn.asia/d/hNqnr7u", asin:"B0CSFQHMSP" },
     { name:"領収証", supplier:A, spec:"コクヨ 領収証 B7ヨコ 5冊 ウケ-1048NX5" },
     { name:"赤シール", supplier:A, spec:"エーワン カラーラベル 赤 丸型 15mm 14シート" },
     { name:"ワッポン（白い四角）", supplier:A, spec:"TRUSCO 貼るプッシュピン 無地 10枚入" },
@@ -535,7 +535,7 @@
     { name:"ラミネートフィルム", supplier:A, spec:"アイリスオーヤマ 100μm A4 100枚入 LZ-A4100R" },
     { name:"ジフ クリームクレンザー", supplier:A, spec:"270ml" },
     { name:"キッチンスポンジ", supplier:A, spec:"小久保工業所 バリューチョイス ソフトタイプ 5個入" },
-    { name:"バススポンジ", supplier:A, spec:"東和産業 BMK ジャンボ ネットクリーナー 3個セット", url:"https://amzn.asia/d/b6fWllC" },
+    { name:"バススポンジ", supplier:A, spec:"東和産業 BMK ジャンボ ネットクリーナー 3個セット", url:"https://amzn.asia/d/b6fWllC", asin:"B00IU76N9M" },
     { name:"親子ブラシ（風呂用）", supplier:A, spec:"アイワ タイルブラシ 大小ブラシ 日本製", url:"https://www.amazon.co.jp/dp/B0052CDZ8A" },
     { name:"パイプユニッシュ", supplier:A, spec:"400g×3本 濃縮タイプ お掃除用手袋付" },
     { name:"排水溝掃除ブラシ", supplier:A, spec:"XIAOBUDING パイプ・排水溝ブラシ ロング ブルー" },
@@ -597,10 +597,19 @@
       chat: {},      // storeId -> [{role, text}]
     };
   }
+  // 既存データを消さずに、seedのASIN等を名前一致で補完する
+  function migrate(s){
+    const asinByName = {};
+    SEED_PRODUCTS.forEach(p => { if(p.asin) asinByName[p.name] = p.asin; });
+    (s.products || []).forEach(p => {
+      if((!p.asin || !String(p.asin).trim()) && asinByName[p.name]) p.asin = asinByName[p.name];
+    });
+    return s;
+  }
   function load(){
     try{
       const raw = localStorage.getItem(STORAGE_KEY);
-      if(raw){ const s = JSON.parse(raw); if(s && s.products) return s; }
+      if(raw){ const s = JSON.parse(raw); if(s && s.products) return migrate(s); }
     }catch(e){}
     return freshState();
   }
