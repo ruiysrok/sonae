@@ -391,7 +391,7 @@
         <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
         <span id="themeLabel">テーマ</span>
       </button>
-      <div class="note">商品は店舗ごとに管理。価格は未設定（商品マスタで編集可）。<br>データはこのブラウザに保存されます。</div>
+      <div class="note">商品は店舗ごとに管理。価格は未設定（商品マスタで編集可）。<br>データはこのブラウザに保存されます。<br><span id="cloudStatus">共有DB: 未設定</span></div>
     </div>
   </aside>
 
@@ -589,6 +589,22 @@
      空のままなら送信しません（アプリ単体で動作）。例: "https://自分のサーバー/order" */
   const ORDER_ENDPOINT = "";
 
+  /* ========= Firebase 共有データベース =========
+     設定すると「誰が・どの店舗で・何を・いくつ」発注したかを全端末で共有できます。
+     Firebaseコンソール（無料）で取得した firebaseConfig を下に貼り付けてください。
+     null のままなら従来どおり端末内保存のみで動きます。
+     例:
+     const FIREBASE_CONFIG = {
+       apiKey: "AIza...",
+       authDomain: "sonae-xxxx.firebaseapp.com",
+       projectId: "sonae-xxxx",
+       storageBucket: "sonae-xxxx.appspot.com",
+       messagingSenderId: "123456789",
+       appId: "1:123456789:web:abc..."
+     };
+  */
+  const FIREBASE_CONFIG = null;
+
   /* ========= State & persistence ========= */
   const STORAGE_KEY = "sonae_v5";
   let _uidc = 0;
@@ -703,6 +719,59 @@
       }).catch(()=>{});
     }catch(e){}
   }
+
+  /* ---- Firebase 共有履歴（FIREBASE_CONFIG 設定時のみ有効） ---- */
+  let fdb = null;          // Firestore接続
+  let cloudOrders = null;  // 現在店舗の共有履歴
+  let cloudUnsub = null;
+
+  function setCloudStatus(text){
+    const el = $("#cloudStatus"); if(el) el.textContent = text;
+  }
+  function initFirebase(){
+    if(!FIREBASE_CONFIG) return;
+    setCloudStatus("共有DB: 接続中…");
+    const s1 = document.createElement("script");
+    s1.src = "https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js";
+    s1.onload = ()=>{
+      const s2 = document.createElement("script");
+      s2.src = "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js";
+      s2.onload = ()=>{
+        try{
+          firebase.initializeApp(FIREBASE_CONFIG);
+          fdb = firebase.firestore();
+          subscribeCloudOrders();
+          setCloudStatus("共有DB: 接続済み ●");
+        }catch(e){ setCloudStatus("共有DB: 接続失敗"); }
+      };
+      s2.onerror = ()=>setCloudStatus("共有DB: 読み込み失敗");
+      document.head.appendChild(s2);
+    };
+    s1.onerror = ()=>setCloudStatus("共有DB: 読み込み失敗");
+    document.head.appendChild(s1);
+  }
+  function subscribeCloudOrders(){
+    if(!fdb) return;
+    if(cloudUnsub){ cloudUnsub(); cloudUnsub = null; }
+    cloudOrders = null;
+    cloudUnsub = fdb.collection("orders")
+      .where("store","==",state.currentStore).limit(500)
+      .onSnapshot(snap=>{
+        cloudOrders = snap.docs.map(d=>d.data())
+          .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        if(activeView==="history") renderHistory();
+      }, ()=>{ cloudOrders = null; setCloudStatus("共有DB: 読取エラー"); });
+  }
+  function pushOrderToCloud(entry){
+    if(!fdb) return;
+    try{
+      fdb.collection("orders").doc(entry.id)
+        .set({ store: state.currentStore, storeName: store().name, ...entry })
+        .catch(()=>toast("共有DBへの保存に失敗（端末には保存済み）"));
+    }catch(e){}
+  }
+  // 履歴の参照元：共有DBがあればそちら、なければ端末内
+  function historyList(){ return (fdb && cloudOrders) ? cloudOrders : history(); }
 
   /* ========= Helpers ========= */
   const $ = (sel, el=document) => el.querySelector(sel);
@@ -912,6 +981,7 @@
     state.cart[state.currentStore] = [];
     save(); renderCart(); updateCartBadge();
     sendToBackend(entry);
+    pushOrderToCloud(entry);
     return `✅ ${store().name} の発注を確定しました。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n「発注履歴」から確認・CSV出力できます。`;
   }
 
@@ -1167,7 +1237,7 @@
     return `${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
   function renderHistory(){
-    const h = history();
+    const h = historyList();
     if(h.length===0){
       view.innerHTML = `<div class="card"><div class="empty" style="padding:56px 18px">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/></svg>
@@ -1206,7 +1276,7 @@
   }
 
   function downloadCSV(){
-    const h = history();
+    const h = historyList();
     const rows = [["発注日時","店舗","担当者","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計"]];
     h.forEach(e=>{ e.items.forEach(i=>{
       rows.push([fmtDate(e.date), store().name, e.staff||"", i.name, i.supplier||"", i.spec||"", i.unit||"", i.qty, i.price, i.price*i.qty]);
@@ -1444,6 +1514,7 @@
   $("#storeSelect").addEventListener("change", e=>{
     state.currentStore = e.target.value; save();
     pendingQueue = []; // 店舗をまたぐ確認待ちは破棄
+    subscribeCloudOrders(); // 共有履歴を新店舗に切替
     renderStoreSelect(); updateCartBadge(); setView(activeView);
   });
   const staffInput = $("#staffName");
@@ -1465,6 +1536,7 @@
   renderStoreSelect();
   updateCartBadge();
   setView("chat");
+  initFirebase();
 })();
 </script>
 
