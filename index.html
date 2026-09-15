@@ -763,15 +763,50 @@
       }, ()=>{ cloudOrders = null; setCloudStatus("共有DB: 読取エラー"); });
   }
   function pushOrderToCloud(entry){
-    if(!fdb) return;
+    const doc = { store: state.currentStore, storeName: store().name, ...entry };
+    if(fdb){
+      try{
+        fdb.collection("orders").doc(entry.id).set(doc)
+          .catch(()=>toast("共有DBへの保存に失敗（端末には保存済み）"));
+      }catch(e){}
+    }
+    if(cdb){
+      try{
+        cdb.collection("orders").doc(entry.id).set(doc)
+          .catch(()=>toast("共有DBへの保存に失敗（端末には保存済み）"));
+      }catch(e){}
+    }
+  }
+  /* ---- Claude共有DB（claude.aiアーティファクトで開いた時のみ有効） ----
+     Firebase不要。claude.ai上でこのページを開くと自動で接続し、
+     発注履歴が閲覧者全員（同じ組織のログインユーザー）で共有されます。 */
+  let cdb = null;
+  let cUnsub = null;
+  async function initClaudeDb(){
     try{
-      fdb.collection("orders").doc(entry.id)
-        .set({ store: state.currentStore, storeName: store().name, ...entry })
-        .catch(()=>toast("共有DBへの保存に失敗（端末には保存済み）"));
+      if(!(window.claude && typeof window.claude.use === "function")) return;
+      const db = await window.claude.use("db");
+      if(!db) return;
+      cdb = db;
+      subscribeClaudeOrders();
+      setCloudStatus("共有DB: Claude接続済み ●");
     }catch(e){}
   }
+  function subscribeClaudeOrders(){
+    if(!cdb) return;
+    if(cUnsub){ cUnsub(); cUnsub = null; }
+    cloudOrders = null;
+    cUnsub = cdb.collection("orders")
+      .where("store","==",state.currentStore)
+      .orderBy("date","desc").limit(500)
+      .onSnapshot(snap=>{
+        cloudOrders = snap.docs.map(d=>d.data());
+        if(activeView==="history") renderHistory();
+      }, ()=>{ setCloudStatus("共有DB: 読取エラー"); });
+  }
+
   // 履歴の参照元：共有DBがあればそちら、なければ端末内
-  function historyList(){ return (fdb && cloudOrders) ? cloudOrders : history(); }
+  function historyList(){ return ((fdb||cdb) && cloudOrders) ? cloudOrders : history(); }
 
   /* ========= Helpers ========= */
   const $ = (sel, el=document) => el.querySelector(sel);
@@ -1515,6 +1550,7 @@
     state.currentStore = e.target.value; save();
     pendingQueue = []; // 店舗をまたぐ確認待ちは破棄
     subscribeCloudOrders(); // 共有履歴を新店舗に切替
+    subscribeClaudeOrders();
     renderStoreSelect(); updateCartBadge(); setView(activeView);
   });
   const staffInput = $("#staffName");
@@ -1537,6 +1573,7 @@
   updateCartBadge();
   setView("chat");
   initFirebase();
+  initClaudeDb();
 })();
 </script>
 
