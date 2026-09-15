@@ -164,6 +164,15 @@
   .quick{display:flex; gap:7px; flex-wrap:wrap; padding:0 13px 13px; background:var(--surface-2)}
   .quick button{font-size:12.5px; font-weight:600; padding:6px 11px; border:1px solid var(--border-strong); border-radius:30px; background:var(--surface); color:var(--muted); cursor:pointer}
   .quick button:hover{color:var(--accent-ink); border-color:var(--accent)}
+  /* あいまい確認の候補ボタン */
+  .choice-list{display:flex; flex-wrap:wrap; gap:7px; margin-top:9px}
+  .choice-btn{font-size:12.5px; font-weight:700; padding:7px 12px; border:1.5px solid var(--accent); border-radius:20px; background:var(--surface); color:var(--accent-ink); cursor:pointer; font-family:inherit}
+  .choice-btn:hover{background:var(--accent-soft)}
+  .choice-btn.cancel{border-color:var(--border-strong); color:var(--muted)}
+  .choice-done{font-size:12px; color:var(--faint); margin-top:8px; font-weight:600}
+  /* 担当者入力 */
+  .staff-input{width:100%; padding:10px 12px; font-size:14px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface-2); color:var(--ink); font-family:inherit}
+  .staff-input:focus{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
 
   .btn{border:none; border-radius:var(--radius-sm); padding:10px 15px; font-size:14px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; gap:7px; justify-content:center}
   .btn.primary{background:var(--accent); color:var(--accent-fg)}
@@ -353,6 +362,9 @@
       <select id="storeSelect"></select>
     </div>
     <div class="store-meta" id="storeMeta"></div>
+
+    <div class="label">担当者</div>
+    <input id="staffName" class="staff-input" placeholder="名前（発注記録に残ります）" />
 
     <div class="label">メニュー</div>
     <nav class="nav" id="nav">
@@ -721,29 +733,45 @@
   /* ========= Chat engine ========= */
   function pushChat(role, text){ chatLog().push({role, text}); save(); }
 
-  function matchProduct(text){
-    if(!text) return null;
-    const q = text.replace(/\s+/g,"").toLowerCase();
-    if(!q) return null;
+  // 候補をスコア順に全部返す（完全一致=100）
+  function matchCandidates(text){
+    if(!text) return [];
+    const q = String(text).replace(/\s+/g,"").toLowerCase();
+    if(!q) return [];
     const norm = (s)=>String(s||"").replace(/\s+/g,"").toLowerCase();
-    // exact-ish on name or alias
-    let best=null, bestScore=0;
+    const out = [];
     for(const p of scopedProducts()){
       const n = norm(p.name), a = norm(p.alias);
       let sc=0;
-      if(n===q || a===q) sc=100;
-      else if(a && (q.includes(a)||a.includes(q))) sc=Math.max(sc, 70 + Math.min(a.length,q.length));
-      else if(n.includes(q)||q.includes(n)) sc=Math.max(sc, 60 + Math.min(n.length,q.length));
-      if(sc>bestScore){ bestScore=sc; best=p; }
+      if(n===q || (a && a===q)) sc=100;
+      else if(a && (q.includes(a)||a.includes(q))) sc=70 + Math.min(a.length,q.length);
+      else if(n.includes(q)||q.includes(n)) sc=60 + Math.min(n.length,q.length);
+      if(sc>0) out.push({p, sc});
     }
-    return bestScore>0 ? best : null;
+    out.sort((x,y)=>y.sc-x.sc);
+    return out;
   }
 
-  // convert full-width digits then parse
+  const COUNTERS = "個|本|箱|ケース|枚|セット|膳|着|つ|点|袋|巻|ロール";
+  const z2h = (s)=>String(s).replace(/[０-９]/g, d => "0123456789"["０１２３４５６７８９".indexOf(d)]);
+
+  // 数量は「末尾」または「先頭」に付いたものだけ拾う（商品名内の数字を数量と誤認しない）
   function parseQty(raw){
-    const z2h = raw.replace(/[０-９]/g, d => "0123456789"["０１２３４５６７８９".indexOf(d)]);
-    const m = z2h.match(/(\d+)/);
-    return m ? parseInt(m[1],10) : null;
+    const s = z2h(raw);
+    let m = s.match(new RegExp("([0-9]+)\\s*(?:"+COUNTERS+")?\\s*(?:を|お願いします?|ください)?\\s*$"));
+    if(m) return parseInt(m[1],10);
+    m = s.match(new RegExp("^\\s*([0-9]+)\\s*(?:"+COUNTERS+")"));
+    if(m) return parseInt(m[1],10);
+    return null;
+  }
+
+  // 数量・依頼語を取り除いて商品名部分だけにする
+  function stripQtyWords(seg){
+    let s = z2h(seg);
+    s = s.replace(new RegExp("([0-9]+)\\s*(?:"+COUNTERS+")?\\s*(?:を|お願いします?|ください)?\\s*$"),"");
+    s = s.replace(new RegExp("^\\s*([0-9]+)\\s*(?:"+COUNTERS+")\\s*"),"");
+    s = s.replace(/(を|も|追加|発注|注文|ください|お願いします?|ちょうだい|ほしい|欲しい|頼む|たのむ)/g,"");
+    return s.trim();
   }
 
   function handleCommand(raw){
@@ -768,19 +796,84 @@
       return helpText();
     }
 
-    // product + qty
-    const qty = parseQty(text) || 1;
-    const nameText = text
-      .replace(/[0-9０-９]+\s*(個|本|箱|ケース|ケ|枚|セット|膳|着|つ|点)?/g,"")
-      .replace(/(を|追加|発注|注文|ください|お願いします?|ちょうだい|ほしい|欲しい|頼む|たのむ)/g,"")
-      .trim();
-    const p = matchProduct(nameText) || matchProduct(text);
-    if(p){
-      addToCart(p.id, qty);
-      renderCart(); updateCartBadge();
-      return `「${p.name}」を ${qty} ${unitShort(p.unit)} カートに追加しました。\n現在 ${cartCount()} 点 / ${yen(cartTotal())} です。「発注」で確定できます。`;
+    // 商品＋数量（複数品目・あいまい確認に対応）
+    return handleOrderText(text);
+  }
+
+  // 「カビキラー2個とトイレマジックリン3個」のような複数品目を分解して処理
+  let pendingQueue = [];   // あいまい確認の待ち行列 [{query, qty, options:[product]}]
+  function handleOrderText(text){
+    // 商品名に「と」等を含む場合に備え、まず全体を1商品として完全一致チェック
+    const whole = matchCandidates(stripQtyWords(text));
+    const segs = (whole.length && whole[0].sc===100)
+      ? [text]
+      : text.split(/[と、,，・\n]+/).map(s=>s.trim()).filter(Boolean);
+
+    const added = [], notFound = [], pendings = [];
+    for(const seg of segs){
+      const qty = parseQty(seg) || 1;
+      const nameText = stripQtyWords(seg);
+      let cands = matchCandidates(nameText);
+      if(!cands.length) cands = matchCandidates(seg);
+      if(!cands.length){ notFound.push(seg); continue; }
+      if(cands[0].sc===100 || cands.length===1){
+        const p = cands[0].p;
+        addToCart(p.id, qty);
+        added.push({p, qty});
+      } else {
+        // 複数候補 → 勝手に選ばず確認する
+        pendings.push({ query: nameText || seg, qty, options: cands.slice(0,4).map(c=>c.p) });
+      }
     }
-    return `「${text}」に一致する商品が見つかりませんでした。\n「一覧」で登録商品を確認するか、「商品マスタ」から登録してください。`;
+    if(added.length){ renderCart(); updateCartBadge(); }
+
+    let msg = "";
+    for(const a of added) msg += `✅ 「${a.p.name}」を ${a.qty} ${unitShort(a.p.unit)} カートに追加しました。\n`;
+    for(const nf of notFound) msg += `❓「${nf}」に一致する商品が見つかりませんでした（「一覧」で確認できます）。\n`;
+    if(added.length) msg += `現在 ${cartCount()} 点 ／ ${totalLabel(cartTotal())}。「発注」で確定できます。`;
+    msg = msg.trim();
+
+    if(pendings.length){
+      pendingQueue.push(...pendings);
+      if(msg){ pushChat("bot", msg); renderChatMessages(); }
+      askNextPending();
+      return "__PENDING__"; // 確認メッセージは送信済み
+    }
+    return msg || null;
+  }
+
+  function askNextPending(){
+    if(!pendingQueue.length) return;
+    const pend = pendingQueue[0];
+    chatLog().push({
+      role:"bot",
+      text:`「${pend.query}」は複数の商品に当てはまります。どれを ${pend.qty} 追加しますか？`,
+      choices: pend.options.map(p=>({id:p.id, label:p.name})),
+      qty: pend.qty, resolved:false
+    });
+    save();
+    renderChatMessages();
+  }
+
+  function onChoiceClick(mi, pid){
+    const msgs = chatLog(); const m = msgs[mi];
+    if(!m || !m.choices || m.resolved) return;
+    m.resolved = true;
+    if(pid){
+      const p = product(pid);
+      if(p){
+        addToCart(p.id, m.qty||1);
+        m.chosenLabel = p.name;
+        save(); renderCart(); updateCartBadge();
+        pushChat("bot", `✅ 「${p.name}」を ${m.qty||1} ${unitShort(p.unit)} カートに追加しました。\n現在 ${cartCount()} 点 ／ ${totalLabel(cartTotal())}。`);
+      }
+    } else {
+      m.chosenLabel = "追加しない"; save();
+      pushChat("bot","了解しました。追加していません。");
+    }
+    if(pendingQueue.length) pendingQueue.shift();
+    renderChatMessages();
+    askNextPending();
   }
 
   function unitShort(unit){
@@ -806,7 +899,7 @@
     return s;
   }
   function helpText(){
-    return "こう使えます：\n① 「タオル 3」のように 商品名＋数量 を送る\n② 「カート」で中身と合計を確認\n③ 「発注」で確定 → 発注履歴に保存\n他：「一覧」＝商品一覧 / 「クリア」＝カートを空に";
+    return "こう使えます：\n① 「カビキラー 2」のように 商品名＋数量 を送る\n　（「カビキラー2個とトイレマジックリン3個」のように複数同時もOK）\n② 候補が複数ある時はボタンで確認します\n③ 「カート」で中身と合計を確認\n④ 「発注」で確定 → 発注履歴に保存\n他：「一覧」＝商品一覧 / 「クリア」＝カートを空に";
   }
 
   function finalizeOrder(){
@@ -814,7 +907,7 @@
     const items = cart().map(i=>{ const p=product(i.productId);
       return { name:p.name, supplier:p.supplier, spec:p.spec, unit:p.unit, qty:i.qty, price:p.price }; });
     const total = cartTotal();
-    const entry = { id: uid(), date: new Date().toISOString(), items, total };
+    const entry = { id: uid(), date: new Date().toISOString(), staff: (state.staffName||"").trim(), items, total };
     history().unshift(entry);
     state.cart[state.currentStore] = [];
     save(); renderCart(); updateCartBadge();
@@ -825,8 +918,9 @@
   function botReply(raw){
     pushChat("user", raw);
     renderChatMessages();
-    const reply = handleCommand(raw) || "うまく聞き取れませんでした。「ヘルプ」と送ってみてください。";
-    pushChat("bot", reply);
+    const reply = handleCommand(raw);
+    if(reply === "__PENDING__") return; // あいまい確認は送信済み
+    pushChat("bot", reply || "うまく聞き取れませんでした。「ヘルプ」と送ってみてください。");
     renderChatMessages();
   }
 
@@ -900,6 +994,11 @@
       const inp = $("#chatInput"); const v = inp.value.trim();
       if(!v) return; inp.value=""; botReply(v);
     });
+    // あいまい確認の候補ボタン（委譲）
+    $("#chatScroll").addEventListener("click", e=>{
+      const b = e.target.closest(".choice-btn"); if(!b) return;
+      onChoiceClick(parseInt(b.dataset.mi,10), b.dataset.id);
+    });
   }
   function renderQuick(){
     const chips = ["一覧","カート","発注","ヘルプ"];
@@ -908,9 +1007,19 @@
   }
   function renderChatMessages(){
     const sc = $("#chatScroll"); if(!sc) return;
-    sc.innerHTML = chatLog().map(m=>{
+    sc.innerHTML = chatLog().map((m,mi)=>{
       const av = m.role==="bot" ? "そ" : "店";
-      return `<div class="msg ${m.role}"><div class="av">${av}</div><div class="bubble">${formatMsg(m.text)}</div></div>`;
+      let extra = "";
+      if(m.choices){
+        if(m.resolved){
+          extra = `<div class="choice-done">→ ${esc(m.chosenLabel||"選択済み")}</div>`;
+        } else {
+          extra = `<div class="choice-list">` +
+            m.choices.map(c=>`<button type="button" class="choice-btn" data-mi="${mi}" data-id="${esc(c.id)}">${esc(c.label)}</button>`).join("") +
+            `<button type="button" class="choice-btn cancel" data-mi="${mi}" data-id="">追加しない</button></div>`;
+        }
+      }
+      return `<div class="msg ${m.role}"><div class="av">${av}</div><div class="bubble">${formatMsg(m.text)}${extra}</div></div>`;
     }).join("");
     sc.scrollTop = sc.scrollHeight;
   }
@@ -1085,6 +1194,7 @@
           <div class="hist-head">
             <span class="no">#${h.length-idx}</span>
             <span class="dt">${fmtDate(e.date)}</span>
+            ${e.staff?`<span class="dt">担当: ${esc(e.staff)}</span>`:""}
             <span class="tot tnum">${totalLabel(e.total)}</span>
           </div>
           <div class="hist-body">${
@@ -1097,9 +1207,9 @@
 
   function downloadCSV(){
     const h = history();
-    const rows = [["発注日時","店舗","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計"]];
+    const rows = [["発注日時","店舗","担当者","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計"]];
     h.forEach(e=>{ e.items.forEach(i=>{
-      rows.push([fmtDate(e.date), store().name, i.name, i.supplier||"", i.spec||"", i.unit||"", i.qty, i.price, i.price*i.qty]);
+      rows.push([fmtDate(e.date), store().name, e.staff||"", i.name, i.supplier||"", i.spec||"", i.unit||"", i.qty, i.price, i.price*i.qty]);
     }); });
     const csv = "﻿" + rows.map(r=> r.map(c=>{
       const v = String(c); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
@@ -1333,8 +1443,12 @@
   /* ========= Wire up ========= */
   $("#storeSelect").addEventListener("change", e=>{
     state.currentStore = e.target.value; save();
+    pendingQueue = []; // 店舗をまたぐ確認待ちは破棄
     renderStoreSelect(); updateCartBadge(); setView(activeView);
   });
+  const staffInput = $("#staffName");
+  staffInput.value = state.staffName || "";
+  staffInput.addEventListener("input", ()=>{ state.staffName = staffInput.value; save(); });
   $("#nav").addEventListener("click", e=>{
     const b = e.target.closest("button[data-view]"); if(b) setView(b.dataset.view);
   });
