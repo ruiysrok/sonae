@@ -905,16 +905,15 @@
 
   /* ---- 進捗ステータス（発注準備中 → 注文済み → 納品済み） ---- */
   const STATUS = {
-    preparing: { label:"発注準備中", cls:"st-prep" },
-    ordered:   { label:"注文済み",   cls:"st-ord" },
-    delivered: { label:"納品済み",   cls:"st-del" },
+    preparing: { label:"受取待ち", cls:"st-ord" },
+    ordered:   { label:"受取待ち", cls:"st-ord" },  // 旧データ互換
+    delivered: { label:"受取済み ✓", cls:"st-del" },
   };
   function itemStatus(i){ return STATUS[i.status] ? i.status : "preparing"; }
   function orderAgg(e){
     const sts = (e.items||[]).map(itemStatus);
-    if(sts.length && sts.every(s=>s==="delivered")) return STATUS.delivered;
-    if(sts.some(s=>s==="preparing")) return { label:"未注文あり", cls:"st-prep" };
-    return STATUS.ordered;
+    if(sts.length && sts.every(s=>s==="delivered")) return { label:"すべて受取済み ✓", cls:"st-del" };
+    return { label:"受取待ちあり", cls:"st-ord" };
   }
   // 品目の状態を更新（誰が・いつ押したかを記録し、全端末に共有）
   function setItemStatus(orderId, itemName, status){
@@ -942,7 +941,7 @@
       if(cdb){ try{ cdb.collection("orders").doc(orderId).set(doc).catch(()=>{}); }catch(e){} }
     }
     renderHistory();
-    toast(status==="ordered" ? "「注文済み」にしました" : "「納品済み」にしました");
+    toast(status==="delivered" ? "受取済みにしました ✓" : "更新しました");
   }
 
   // 発注の取消（記録は「取消済み」として残す）
@@ -1199,7 +1198,7 @@
     save(); renderCart(); updateCartBadge();
     sendToBackend(entry);
     pushOrderToCloud(entry);
-    return { ok:true, msg:`✅ ${store().name} の発注リストを確定しました（担当: ${staff}）。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n⚠️ まだ「発注準備中」です。Amazon等で実際に注文したら、発注履歴で各品の「注文した ✓」を押してください。届いたら受け取った人が「納品済みにする」を押します。` };
+    return { ok:true, msg:`✅ ${store().name} の発注を確定しました（担当: ${staff}）。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n📦 品物が届いたら、受け取った人が「発注履歴」で「受け取った ✓」を押してください。` };
   }
 
   function botReply(raw){
@@ -1470,17 +1469,15 @@
     const active = h.filter(e=>!e.cancelled);
     const totalSum = active.reduce((s,e)=>s+e.total,0);
     const cancelledCount = h.length - active.length;
-    let prepPts=0, ordPts=0, delPts=0;
+    let waitPts=0, delPts=0;
     active.forEach(e=>(e.items||[]).forEach(i=>{
-      const q = i.qty||0, s = itemStatus(i);
-      if(s==="preparing") prepPts+=q; else if(s==="ordered") ordPts+=q; else delPts+=q;
+      const q = i.qty||0;
+      if(itemStatus(i)==="delivered") delPts+=q; else waitPts+=q;
     }));
     view.innerHTML = `
-      ${prepPts>0?`<div class="warn-strip">⚠️ まだ実際に注文していない品が ${prepPts} 点あります。Amazon等で注文したら、各品の「注文した ✓」を押して記録してください。</div>`:""}
-      <div class="stats" style="grid-template-columns:repeat(4,1fr)">
-        <div class="stat"><div class="k">発注準備中（未注文）</div><div class="v tnum" style="${prepPts?"color:var(--danger)":""}">${prepPts}<small>点</small></div></div>
-        <div class="stat"><div class="k">注文済み（納品待ち）</div><div class="v tnum">${ordPts}<small>点</small></div></div>
-        <div class="stat"><div class="k">納品済み</div><div class="v tnum">${delPts}<small>点</small></div></div>
+      <div class="stats">
+        <div class="stat"><div class="k">受取待ち</div><div class="v tnum" style="${waitPts?"color:var(--warn)":""}">${waitPts}<small>点</small></div></div>
+        <div class="stat"><div class="k">受取済み</div><div class="v tnum">${delPts}<small>点</small></div></div>
         <div class="stat"><div class="k">金額 合計${cancelledCount?`・取消${cancelledCount}件`:""}</div><div class="v tnum">${totalLabel(totalSum)}</div></div>
       </div>
       <div class="toolbar" style="justify-content:flex-end;margin-bottom:14px">
@@ -1505,8 +1502,7 @@
               const s = itemStatus(i);
               let act = "";
               if(!e.cancelled){
-                if(s==="preparing") act = `<button class="st-btn" data-st="ordered" data-oid="${esc(e.id)}" data-item="${esc(i.name)}">注文した ✓</button>`;
-                else if(s==="ordered") act = `<button class="st-btn" data-st="delivered" data-oid="${esc(e.id)}" data-item="${esc(i.name)}">納品済みにする</button>`;
+                if(s!=="delivered") act = `<button class="st-btn" data-st="delivered" data-oid="${esc(e.id)}" data-item="${esc(i.name)}">受け取った ✓</button>`;
                 else act = `<span class="st-meta">✓ ${esc(i.statusBy||"")} ${i.statusAt?fmtDate(i.statusAt):""}</span>`;
               }
               return `<div class="hist-line">
