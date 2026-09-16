@@ -242,9 +242,22 @@
   .hist-head .dt{font-size:12.5px; color:var(--muted)}
   .hist-head .tot{margin-left:auto; font-weight:800; font-size:15px}
   .hist-body{padding:6px 16px 12px}
-  .hist-line{display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px dashed var(--border); font-size:13.5px}
+  .hist-line{display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 0; border-bottom:1px dashed var(--border); font-size:13.5px}
   .hist-line:last-child{border-bottom:none}
   .hist-line .q{color:var(--muted); font-variant-numeric:tabular-nums}
+  .hl-right{display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:wrap}
+  /* 進捗ステータス */
+  .st{font-size:10.5px; font-weight:800; padding:3px 9px; border-radius:20px; white-space:nowrap}
+  .st-prep{background:var(--danger-soft); color:var(--danger)}
+  .st-ord{background:var(--warn-soft); color:var(--warn)}
+  .st-del{background:var(--accent-soft); color:var(--accent-ink)}
+  .st-btn{font-size:11.5px; font-weight:700; padding:5px 11px; border-radius:8px; border:1px solid var(--border-strong); background:var(--surface-2); color:var(--ink); cursor:pointer; font-family:inherit; white-space:nowrap}
+  .st-btn:hover{border-color:var(--accent); color:var(--accent-ink); background:var(--accent-soft)}
+  .st-meta{font-size:11px; color:var(--faint); white-space:nowrap}
+  .warn-strip{background:var(--danger-soft); color:var(--danger); font-weight:700; font-size:13px; padding:11px 15px; border-radius:10px; margin-bottom:14px}
+  /* 発注単位の明示 */
+  .unit-note{font-size:12.5px; font-weight:700; color:var(--accent-ink); background:var(--accent-soft); padding:6px 13px; border-radius:8px; display:inline-block}
+  .unit-note.miss{background:var(--warn-soft); color:var(--warn)}
 
   /* ---------- Stock check ---------- */
   .stock-wrap{max-width:560px; margin:0 auto; display:flex; flex-direction:column; gap:18px}
@@ -868,6 +881,48 @@
     return null;
   }
 
+  /* ---- 進捗ステータス（発注準備中 → 注文済み → 納品済み） ---- */
+  const STATUS = {
+    preparing: { label:"発注準備中", cls:"st-prep" },
+    ordered:   { label:"注文済み",   cls:"st-ord" },
+    delivered: { label:"納品済み",   cls:"st-del" },
+  };
+  function itemStatus(i){ return STATUS[i.status] ? i.status : "preparing"; }
+  function orderAgg(e){
+    const sts = (e.items||[]).map(itemStatus);
+    if(sts.length && sts.every(s=>s==="delivered")) return STATUS.delivered;
+    if(sts.some(s=>s==="preparing")) return { label:"未注文あり", cls:"st-prep" };
+    return STATUS.ordered;
+  }
+  // 品目の状態を更新（誰が・いつ押したかを記録し、全端末に共有）
+  function setItemStatus(orderId, itemName, status){
+    const by = (state.staffName||"").trim();
+    if(!by){ toast("先にメニューの「担当者」欄に名前を入力してください"); const si=$("#staffName"); if(si) si.focus(); return; }
+    const at = new Date().toISOString();
+    const apply = (e)=>{ if(!e) return;
+      const it = (e.items||[]).find(i=>i.name===itemName);
+      if(it){ it.status = status; it.statusBy = by; it.statusAt = at; } };
+    apply(history().find(x=>x.id===orderId)); save();
+    if(gasOrders)   apply(gasOrders.find(x=>x.id===orderId));
+    if(cloudOrders) apply(cloudOrders.find(x=>x.id===orderId));
+    if(GAS_ENDPOINT){
+      try{
+        fetch(GAS_ENDPOINT, { method:"POST", headers:{"Content-Type":"text/plain"},
+          body: JSON.stringify({ action:"status", id:orderId, store:state.currentStore, item:itemName, status, staff:by, at }) })
+          .then(()=>fetchGasOrders())
+          .catch(()=>toast("状態の共有に失敗（この端末には記録済み）"));
+      }catch(e){}
+    }
+    const src = historyList().find(x=>x.id===orderId);
+    if(src && (fdb||cdb)){
+      const doc = { store: state.currentStore, storeName: store().name, ...src };
+      if(fdb){ try{ fdb.collection("orders").doc(orderId).set(doc).catch(()=>{}); }catch(e){} }
+      if(cdb){ try{ cdb.collection("orders").doc(orderId).set(doc).catch(()=>{}); }catch(e){} }
+    }
+    renderHistory();
+    toast(status==="ordered" ? "「注文済み」にしました" : "「納品済み」にしました");
+  }
+
   // 発注の取消（記録は「取消済み」として残す）
   function cancelOrder(id){
     if(!confirm("この発注を取り消しますか？\n（記録は消えず「取消済み」と表示されます）")) return;
@@ -1026,9 +1081,10 @@
     if(added.length || removed.length){ renderCart(); updateCartBadge(); }
 
     let msg = "";
-    for(const a of added) msg += `✅ 「${a.p.name}」を ${a.qty} ${unitShort(a.p.unit)} カートに追加しました。\n`;
+    for(const a of added) msg += `✅ 「${a.p.name}」を ${a.qty} ${unitShort(a.p.unit)} カートに追加しました。${a.p.unit?`（1＝${a.p.unit}）`:""}\n`;
     for(const rp of removed) msg += `🗑 「${rp.name}」をカートから削除しました。\n`;
     for(const nf of notFound) msg += `❓「${nf}」に一致する商品が見つかりませんでした（「一覧」で確認できます）。\n`;
+    for(const pd of pendings) msg += `⏳「${pd.query}」は確認が必要です。下のボタンで回答してください。\n`;
     if(added.length || removed.length) msg += `現在 ${cartCount()} 点 ／ ${totalLabel(cartTotal())}。「発注」で確定できます。`;
     msg = msg.trim();
 
@@ -1113,7 +1169,7 @@
       return { ok:false, msg:"⚠️ 発注の前に、メニューの「担当者」欄に名前を入力してください。\n（誰が発注したかを全員で共有するためです。左上の三本線からメニューを開けます）" };
     }
     const items = cart().map(i=>{ const p=product(i.productId);
-      return { name:p.name, supplier:p.supplier, spec:p.spec, unit:p.unit, qty:i.qty, price:p.price }; });
+      return { name:p.name, supplier:p.supplier, spec:p.spec, unit:p.unit, qty:i.qty, price:p.price, status:"preparing" }; });
     const total = cartTotal();
     const entry = { id: uid(), date: new Date().toISOString(), staff, items, total };
     history().unshift(entry);
@@ -1121,7 +1177,7 @@
     save(); renderCart(); updateCartBadge();
     sendToBackend(entry);
     pushOrderToCloud(entry);
-    return { ok:true, msg:`✅ ${store().name} の発注を確定しました（担当: ${staff}）。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n「発注履歴」から確認・取消・CSV出力できます。` };
+    return { ok:true, msg:`✅ ${store().name} の発注リストを確定しました（担当: ${staff}）。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n⚠️ まだ「発注準備中」です。Amazon等で実際に注文したら、発注履歴で各品の「注文した ✓」を押してください。届いたら受け取った人が「納品済みにする」を押します。` };
   }
 
   function botReply(raw){
@@ -1330,7 +1386,7 @@
               const oi = orderInfo(p);
               return `
             <tr>
-              <td><div class="p-name">${esc(p.name)}</div>${p.alias?`<div class="p-alias">呼び名：${esc(p.alias)}</div>`:""}</td>
+              <td><div class="p-name">${esc(p.name)}</div>${p.alias?`<div class="p-alias">呼び名：${esc(p.alias)}</div>`:""}${p.unit?`<div class="p-alias">単位：1＝${esc(p.unit)}</div>`:`<div class="p-alias" style="color:var(--warn)">単位未設定</div>`}</td>
               <td><span class="sup ${supplierChipClass(p.supplier)}">${esc(p.supplier||"—")}</span></td>
               <td style="max-width:320px">${esc(p.spec||"—")}</td>
               <td class="num">${priceLabel(p)}</td>
@@ -1391,43 +1447,71 @@
     }
     const active = h.filter(e=>!e.cancelled);
     const totalSum = active.reduce((s,e)=>s+e.total,0);
-    const itemSum = active.reduce((s,e)=>s+e.items.reduce((a,i)=>a+i.qty,0),0);
     const cancelledCount = h.length - active.length;
+    let prepPts=0, ordPts=0, delPts=0;
+    active.forEach(e=>(e.items||[]).forEach(i=>{
+      const q = i.qty||0, s = itemStatus(i);
+      if(s==="preparing") prepPts+=q; else if(s==="ordered") ordPts+=q; else delPts+=q;
+    }));
     view.innerHTML = `
-      <div class="stats">
-        <div class="stat"><div class="k">発注回数</div><div class="v tnum">${active.length}<small>件</small>${cancelledCount?`<small style="color:var(--danger)">＋取消${cancelledCount}</small>`:""}</div></div>
-        <div class="stat"><div class="k">発注点数 合計</div><div class="v tnum">${itemSum}<small>点</small></div></div>
-        <div class="stat"><div class="k">金額 合計</div><div class="v tnum">${totalLabel(totalSum)}</div></div>
+      ${prepPts>0?`<div class="warn-strip">⚠️ まだ実際に注文していない品が ${prepPts} 点あります。Amazon等で注文したら、各品の「注文した ✓」を押して記録してください。</div>`:""}
+      <div class="stats" style="grid-template-columns:repeat(4,1fr)">
+        <div class="stat"><div class="k">発注準備中（未注文）</div><div class="v tnum" style="${prepPts?"color:var(--danger)":""}">${prepPts}<small>点</small></div></div>
+        <div class="stat"><div class="k">注文済み（納品待ち）</div><div class="v tnum">${ordPts}<small>点</small></div></div>
+        <div class="stat"><div class="k">納品済み</div><div class="v tnum">${delPts}<small>点</small></div></div>
+        <div class="stat"><div class="k">金額 合計${cancelledCount?`・取消${cancelledCount}件`:""}</div><div class="v tnum">${totalLabel(totalSum)}</div></div>
       </div>
       <div class="toolbar" style="justify-content:flex-end;margin-bottom:14px">
         <button class="btn ghost" id="csvBtn">CSVダウンロード</button>
       </div>
       <div class="section-title">発注履歴（新しい順）</div>
       <div class="hist-list">${
-        h.map((e,idx)=>`
+        h.map((e,idx)=>{
+          const agg = orderAgg(e);
+          return `
         <div class="hist-card${e.cancelled?" cancelled":""}">
           <div class="hist-head">
             <span class="no">#${h.length-idx}</span>
             <span class="dt">${fmtDate(e.date)}</span>
             ${e.staff?`<span class="dt">担当: ${esc(e.staff)}</span>`:""}
-            ${e.cancelled?`<span class="badge-cancel">取消済み</span>`:""}
+            ${e.cancelled?`<span class="badge-cancel">取消済み</span>`:`<span class="st ${agg.cls}">${agg.label}</span>`}
             <span class="tot tnum">${totalLabel(e.total)}</span>
             ${!e.cancelled?`<button class="btn danger sm" data-cancel="${esc(e.id)}">取消</button>`:""}
           </div>
           <div class="hist-body">${
-            e.items.map(i=>`<div class="hist-line"><span>${esc(i.name)} <span style="color:var(--faint);font-size:12px">${esc(i.supplier||i.unit||"")}</span></span><span class="q">× ${i.qty}${i.price>0?" ＝ "+yen(i.price*i.qty):""}</span></div>`).join("")
+            e.items.map(i=>{
+              const s = itemStatus(i);
+              let act = "";
+              if(!e.cancelled){
+                if(s==="preparing") act = `<button class="st-btn" data-st="ordered" data-oid="${esc(e.id)}" data-item="${esc(i.name)}">注文した ✓</button>`;
+                else if(s==="ordered") act = `<button class="st-btn" data-st="delivered" data-oid="${esc(e.id)}" data-item="${esc(i.name)}">納品済みにする</button>`;
+                else act = `<span class="st-meta">✓ ${esc(i.statusBy||"")} ${i.statusAt?fmtDate(i.statusAt):""}</span>`;
+              }
+              return `<div class="hist-line">
+                <span>${esc(i.name)} <span style="color:var(--faint);font-size:12px">${esc(i.supplier||"")}${i.unit?" ・ 1＝"+esc(i.unit):""}</span></span>
+                <span class="hl-right">
+                  <span class="q">× ${i.qty}${i.price>0?" ＝ "+yen(i.price*i.qty):""}</span>
+                  ${e.cancelled?"":`<span class="st ${STATUS[s].cls}">${STATUS[s].label}</span>`}
+                  ${act}
+                </span>
+              </div>`;
+            }).join("")
           }</div>
-        </div>`).join("")
+        </div>`;}).join("")
       }</div>`;
     $("#csvBtn").addEventListener("click", downloadCSV);
     $$("[data-cancel]").forEach(b=> b.addEventListener("click", ()=>cancelOrder(b.dataset.cancel)));
+    $$("[data-st]").forEach(b=> b.addEventListener("click", ()=>setItemStatus(b.dataset.oid, b.dataset.item, b.dataset.st)));
   }
 
   function downloadCSV(){
     const h = historyList();
-    const rows = [["発注日時","店舗","担当者","状態","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計"]];
+    // Excel/スプレッドシートで数式として解釈されないようガード（=IMPORT… 等の注入防止）
+    const g = (v)=>{ v = String(v==null?"":v); return /^[=+\-@\t]/.test(v) ? "'"+v : v; };
+    const rows = [["発注日時","店舗","担当者","取消","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計","進捗","進捗変更者","進捗変更日時"]];
     h.forEach(e=>{ e.items.forEach(i=>{
-      rows.push([fmtDate(e.date), store().name, e.staff||"", e.cancelled?"取消済み":"", i.name, i.supplier||"", i.spec||"", i.unit||"", i.qty, i.price, i.price*i.qty]);
+      const s = itemStatus(i);
+      rows.push([fmtDate(e.date), store().name, g(e.staff||""), e.cancelled?"取消済み":"", g(i.name), g(i.supplier||""), g(i.spec||""), g(i.unit||""), i.qty, i.price, i.price*i.qty, STATUS[s].label, g(i.statusBy||""), i.statusAt?fmtDate(i.statusAt):""]);
     }); });
     const csv = "﻿" + rows.map(r=> r.map(c=>{
       const v = String(c); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
@@ -1470,12 +1554,6 @@
     if(type==="order") addToCart(p.id, qty);
     s.actions[p.id] = { type, qty: type==="order" ? qty : 0 };
     save(); updateCartBadge();
-  }
-
-  function amazonUrl(p){
-    return (p.url && p.url.trim())
-      ? p.url.trim()
-      : "https://www.amazon.co.jp/s?k=" + encodeURIComponent(p.name);
   }
 
   function enterStock(){
@@ -1547,7 +1625,10 @@
               <input id="qInput" type="number" min="1" value="${act&&act.type==="order"?act.qty:1}" inputmode="numeric" aria-label="発注数量" />
               <button type="button" id="qInc" aria-label="増やす">＋</button>
             </div>
-            <div class="subt">${p.unit?esc(p.unit)+" 単位 ・ ":""}小計 <b id="qSub">${priceLabel(p)}</b></div>
+            ${p.unit
+              ? `<div class="unit-note">「1」＝ ${esc(p.unit)}</div>`
+              : `<div class="unit-note miss">⚠️「1」が何を指すか未設定です（商品マスタ→編集→発注単位に「3本セット」等を登録すると誤発注を防げます）</div>`}
+            <div class="subt">小計 <b id="qSub">${p.price>0?yen(p.price*(act&&act.type==="order"?act.qty:1)):"—"}</b></div>
             <div class="buttons">
               ${ oi.url ? `<button class="btn primary" id="btnAmazon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M15 3h6v6"/><path d="M10 14L21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
@@ -1676,8 +1757,12 @@
     let price = parseInt($("#f-price").value, 10);
     if(isNaN(price) || price<0) price = 0;
     if(!name){ $("#f-name").focus(); toast("商品名を入力してください"); return; }
+    const urlVal = $("#f-url").value.trim();
+    if(urlVal && !/^https?:\/\//i.test(urlVal)){
+      $("#f-url").focus(); toast("URLは https:// で始まるものを入力してください"); return;
+    }
     const data = {
-      url: $("#f-url").value.trim(),
+      url: urlVal,
       asin: $("#f-asin").value.trim().toUpperCase(),
       name,
       supplier: $("#f-supplier").value,
