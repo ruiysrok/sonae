@@ -783,7 +783,7 @@
     cloudUnsub = fdb.collection("orders")
       .where("store","==",state.currentStore).limit(500)
       .onSnapshot(snap=>{
-        cloudOrders = snap.docs.map(d=>d.data())
+        cloudOrders = sanitizeOrders(snap.docs.map(d=>d.data()))
           .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
         if(activeView==="history") renderHistory();
       }, ()=>{ cloudOrders = null; setCloudStatus("共有DB: 読取エラー"); });
@@ -834,7 +834,7 @@
       .where("store","==",state.currentStore)
       .orderBy("date","desc").limit(500)
       .onSnapshot(snap=>{
-        cloudOrders = snap.docs.map(d=>d.data());
+        cloudOrders = sanitizeOrders(snap.docs.map(d=>d.data()));
         if(activeView==="history") renderHistory();
       }, ()=>{ setCloudStatus("共有DB: 読取エラー"); });
   }
@@ -854,7 +854,7 @@
       const r = await fetch(GAS_ENDPOINT + "?store=" + encodeURIComponent(state.currentStore));
       const j = await r.json();
       if(j && Array.isArray(j.orders)){
-        gasOrders = j.orders.sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")));
+        gasOrders = sanitizeOrders(j.orders).sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")));
         setCloudStatus("共有DB: スプレッドシート接続済み ●");
         if(activeView==="history") renderHistory();
       }
@@ -879,6 +879,28 @@
       if(it) return { staff: e.staff || "誰か", date: e.date, qty: it.qty };
     }
     return null;
+  }
+
+  // セキュリティ：共有DB由来のデータを既知の形・型に正規化する
+  // （不正な書き込みがあっても、表示崩れ・想定外プロパティの混入を防ぐ）
+  function sanitizeOrders(list){
+    if(!Array.isArray(list)) return [];
+    return list.map(o=>{
+      if(!o || typeof o !== "object") return null;
+      return {
+        id: String(o.id||""), date: String(o.date||""),
+        store: String(o.store||""), storeName: String(o.storeName||""),
+        staff: String(o.staff||""), cancelled: !!o.cancelled,
+        total: Number(o.total)||0,
+        items: Array.isArray(o.items) ? o.items.map(i=>({
+          name: String((i&&i.name)||""), supplier: String((i&&i.supplier)||""),
+          spec: String((i&&i.spec)||""), unit: String((i&&i.unit)||""),
+          qty: Number(i&&i.qty)||0, price: Number(i&&i.price)||0,
+          status: (i && STATUS[i.status]) ? i.status : undefined,
+          statusBy: String((i&&i.statusBy)||""), statusAt: String((i&&i.statusAt)||"")
+        })) : []
+      };
+    }).filter(o=>o && o.id);
   }
 
   /* ---- 進捗ステータス（発注準備中 → 注文済み → 納品済み） ---- */
