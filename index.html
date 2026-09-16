@@ -170,6 +170,12 @@
   .choice-btn:hover{background:var(--accent-soft)}
   .choice-btn.cancel{border-color:var(--border-strong); color:var(--muted)}
   .choice-done{font-size:12px; color:var(--faint); margin-top:8px; font-weight:600}
+  /* 在庫確認：前回の回答表示 */
+  .s-prev{font-size:12.5px; color:var(--warn); font-weight:700; margin-top:12px; background:var(--warn-soft); display:inline-block; padding:5px 12px; border-radius:20px}
+  /* 発注履歴：取消 */
+  .hist-card.cancelled{opacity:.55}
+  .hist-card.cancelled .hist-body{text-decoration:line-through}
+  .badge-cancel{font-size:11px; font-weight:800; color:var(--danger); background:var(--danger-soft); padding:3px 10px; border-radius:20px}
   /* 担当者入力 */
   .staff-input{width:100%; padding:10px 12px; font-size:14px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface-2); color:var(--ink); font-family:inherit}
   .staff-input:focus{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
@@ -849,6 +855,40 @@
     return history();
   }
 
+  // 直近72時間以内に同じ商品が発注されていないか（重複発注の警告用）
+  function recentOrderInfo(productName, hours){
+    const cutoff = Date.now() - (hours||72)*3600*1000;
+    for(const e of historyList()){
+      if(e.cancelled) continue;
+      const t = Date.parse(e.date);
+      if(isNaN(t) || t < cutoff) continue;
+      const it = (e.items||[]).find(i=>i.name===productName);
+      if(it) return { staff: e.staff || "誰か", date: e.date, qty: it.qty };
+    }
+    return null;
+  }
+
+  // 発注の取消（記録は「取消済み」として残す）
+  function cancelOrder(id){
+    if(!confirm("この発注を取り消しますか？\n（記録は消えず「取消済み」と表示されます）")) return;
+    const e = history().find(x=>x.id===id);
+    if(e) e.cancelled = true;
+    save();
+    if(GAS_ENDPOINT){
+      try{
+        fetch(GAS_ENDPOINT, { method:"POST", headers:{"Content-Type":"text/plain"},
+          body: JSON.stringify({ action:"cancel", id, store: state.currentStore, staff: state.staffName||"" }) })
+          .then(()=>fetchGasOrders()).catch(()=>{});
+      }catch(err){}
+    }
+    if(cdb){ try{ cdb.collection("orders").doc(id).update({cancelled:true}).catch(()=>{}); }catch(err){} }
+    if(fdb){ try{ fdb.collection("orders").doc(id).update({cancelled:true}).catch(()=>{}); }catch(err){} }
+    // 共有側の反映を待たずローカル表示にも即反映
+    if(gasOrders){ const g = gasOrders.find(x=>x.id===id); if(g) g.cancelled = true; }
+    if(cloudOrders){ const c = cloudOrders.find(x=>x.id===id); if(c) c.cancelled = true; }
+    renderHistory(); toast("発注を取り消しました");
+  }
+
   /* ========= Helpers ========= */
   const $ = (sel, el=document) => el.querySelector(sel);
   const esc = (s) => String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -924,7 +964,7 @@
     if(!text) return null;
 
     if(/^(発注|注文|確定|これで|オーダー)/.test(text) && !/(取消|キャンセル|やめ)/.test(text)){
-      return finalizeOrder();
+      return finalizeOrder().msg;
     }
     if(/(クリア|取消|キャンセル|空に|やめ|リセット)/.test(text)){
       if(cart().length===0) return "カートは空です。";
@@ -954,28 +994,42 @@
       ? [text]
       : text.split(/[と、,，・\n]+/).map(s=>s.trim()).filter(Boolean);
 
-    const added = [], notFound = [], pendings = [];
+    const added = [], removed = [], notFound = [], pendings = [];
     for(const seg of segs){
-      const qty = parseQty(seg) || 1;
+      const qn = parseQty(seg);
+      const qty = (qn === null || qn === undefined) ? 1 : qn;
       const nameText = stripQtyWords(seg);
       let cands = matchCandidates(nameText);
       if(!cands.length) cands = matchCandidates(seg);
       if(!cands.length){ notFound.push(seg); continue; }
       if(cands[0].sc===100 || cands.length===1){
         const p = cands[0].p;
-        addToCart(p.id, qty);
-        added.push({p, qty});
+        if(qty === 0){
+          // 「カビキラー 0」＝カートから削除
+          if(cartQty(p.id) > 0){ setQty(p.id, 0); removed.push(p); }
+          else notFound.push(`${p.name}（カートに入っていません）`);
+          continue;
+        }
+        const dup = recentOrderInfo(p.name);
+        if(dup){
+          // 直近に発注済み → 勝手に追加せず確認する
+          pendings.push({ query: p.name, qty, options: [p], dup });
+        } else {
+          addToCart(p.id, qty);
+          added.push({p, qty});
+        }
       } else {
         // 複数候補 → 勝手に選ばず確認する
         pendings.push({ query: nameText || seg, qty, options: cands.slice(0,4).map(c=>c.p) });
       }
     }
-    if(added.length){ renderCart(); updateCartBadge(); }
+    if(added.length || removed.length){ renderCart(); updateCartBadge(); }
 
     let msg = "";
     for(const a of added) msg += `✅ 「${a.p.name}」を ${a.qty} ${unitShort(a.p.unit)} カートに追加しました。\n`;
+    for(const rp of removed) msg += `🗑 「${rp.name}」をカートから削除しました。\n`;
     for(const nf of notFound) msg += `❓「${nf}」に一致する商品が見つかりませんでした（「一覧」で確認できます）。\n`;
-    if(added.length) msg += `現在 ${cartCount()} 点 ／ ${totalLabel(cartTotal())}。「発注」で確定できます。`;
+    if(added.length || removed.length) msg += `現在 ${cartCount()} 点 ／ ${totalLabel(cartTotal())}。「発注」で確定できます。`;
     msg = msg.trim();
 
     if(pendings.length){
@@ -990,12 +1044,16 @@
   function askNextPending(){
     if(!pendingQueue.length) return;
     const pend = pendingQueue[0];
-    chatLog().push({
-      role:"bot",
-      text:`「${pend.query}」は複数の商品に当てはまります。どれを ${pend.qty} 追加しますか？`,
-      choices: pend.options.map(p=>({id:p.id, label:p.name})),
-      qty: pend.qty, resolved:false
-    });
+    let text, choices;
+    if(pend.dup){
+      // 重複発注の警告
+      text = `⚠️ 「${pend.query}」は ${fmtDate(pend.dup.date)} に ${pend.dup.staff} さんが ${pend.dup.qty} 発注済みです。\nさらに ${pend.qty} 追加しますか？`;
+      choices = [{ id: pend.options[0].id, label: `それでも ${pend.qty} 追加する` }];
+    } else {
+      text = `「${pend.query}」は複数の商品に当てはまります。どれを ${pend.qty} 追加しますか？`;
+      choices = pend.options.map(p=>({id:p.id, label:p.name}));
+    }
+    chatLog().push({ role:"bot", text, choices, qty: pend.qty, resolved:false });
     save();
     renderChatMessages();
   }
@@ -1044,21 +1102,26 @@
     return s;
   }
   function helpText(){
-    return "こう使えます：\n① 「カビキラー 2」のように 商品名＋数量 を送る\n　（「カビキラー2個とトイレマジックリン3個」のように複数同時もOK）\n② 候補が複数ある時はボタンで確認します\n③ 「カート」で中身と合計を確認\n④ 「発注」で確定 → 発注履歴に保存\n他：「一覧」＝商品一覧 / 「クリア」＝カートを空に";
+    return "こう使えます：\n① 「カビキラー 2」のように 商品名＋数量 を送る\n　（「カビキラー2個とトイレマジックリン3個」のように複数同時もOK）\n② 候補が複数ある時・直近に発注済みの時はボタンで確認します\n③ 「カビキラー 0」でカートから削除\n④ 「カート」で中身と合計を確認\n⑤ 「発注」で確定 → 発注履歴に保存（履歴から取消もできます）\n他：「一覧」＝商品一覧 / 「クリア」＝カートを空に";
   }
 
   function finalizeOrder(){
-    if(cart().length===0) return "カートが空です。先に商品を追加してください（例：トイペ 2）。";
+    if(cart().length===0) return { ok:false, msg:"カートが空です。先に商品を追加してください（例：カビキラー 2）。" };
+    const staff = (state.staffName||"").trim();
+    if(!staff){
+      const si = $("#staffName"); if(si){ si.focus(); }
+      return { ok:false, msg:"⚠️ 発注の前に、メニューの「担当者」欄に名前を入力してください。\n（誰が発注したかを全員で共有するためです。左上の三本線からメニューを開けます）" };
+    }
     const items = cart().map(i=>{ const p=product(i.productId);
       return { name:p.name, supplier:p.supplier, spec:p.spec, unit:p.unit, qty:i.qty, price:p.price }; });
     const total = cartTotal();
-    const entry = { id: uid(), date: new Date().toISOString(), staff: (state.staffName||"").trim(), items, total };
+    const entry = { id: uid(), date: new Date().toISOString(), staff, items, total };
     history().unshift(entry);
     state.cart[state.currentStore] = [];
     save(); renderCart(); updateCartBadge();
     sendToBackend(entry);
     pushOrderToCloud(entry);
-    return `✅ ${store().name} の発注を確定しました。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n「発注履歴」から確認・CSV出力できます。`;
+    return { ok:true, msg:`✅ ${store().name} の発注を確定しました（担当: ${staff}）。\n${items.length} 品目 ／ 合計 ${totalLabel(total)}\n「発注履歴」から確認・取消・CSV出力できます。` };
   }
 
   function botReply(raw){
@@ -1216,7 +1279,11 @@
       st.querySelector('[data-act="dec"]').addEventListener("click", ()=>{ setQty(id, cartQty(id)-1); renderCart(); updateCartBadge(); });
     });
     const po = $("#placeOrder");
-    if(po) po.addEventListener("click", ()=>{ const msg = finalizeOrder(); pushChat("bot", msg); renderChatMessages(); toast("発注を確定しました"); });
+    if(po) po.addEventListener("click", ()=>{
+      const r = finalizeOrder();
+      pushChat("bot", r.msg); renderChatMessages();
+      toast(r.ok ? "発注を確定しました" : "確定できませんでした");
+    });
     const cc = $("#clearCart");
     if(cc) cc.addEventListener("click", ()=>{ state.cart[state.currentStore]=[]; save(); renderCart(); updateCartBadge(); toast("カートを空にしました"); });
     const ac = $("#amznCart");
@@ -1322,11 +1389,13 @@
       </div></div>`;
       return;
     }
-    const totalSum = h.reduce((s,e)=>s+e.total,0);
-    const itemSum = h.reduce((s,e)=>s+e.items.reduce((a,i)=>a+i.qty,0),0);
+    const active = h.filter(e=>!e.cancelled);
+    const totalSum = active.reduce((s,e)=>s+e.total,0);
+    const itemSum = active.reduce((s,e)=>s+e.items.reduce((a,i)=>a+i.qty,0),0);
+    const cancelledCount = h.length - active.length;
     view.innerHTML = `
       <div class="stats">
-        <div class="stat"><div class="k">発注回数</div><div class="v tnum">${h.length}<small>件</small></div></div>
+        <div class="stat"><div class="k">発注回数</div><div class="v tnum">${active.length}<small>件</small>${cancelledCount?`<small style="color:var(--danger)">＋取消${cancelledCount}</small>`:""}</div></div>
         <div class="stat"><div class="k">発注点数 合計</div><div class="v tnum">${itemSum}<small>点</small></div></div>
         <div class="stat"><div class="k">金額 合計</div><div class="v tnum">${totalLabel(totalSum)}</div></div>
       </div>
@@ -1336,12 +1405,14 @@
       <div class="section-title">発注履歴（新しい順）</div>
       <div class="hist-list">${
         h.map((e,idx)=>`
-        <div class="hist-card">
+        <div class="hist-card${e.cancelled?" cancelled":""}">
           <div class="hist-head">
             <span class="no">#${h.length-idx}</span>
             <span class="dt">${fmtDate(e.date)}</span>
             ${e.staff?`<span class="dt">担当: ${esc(e.staff)}</span>`:""}
+            ${e.cancelled?`<span class="badge-cancel">取消済み</span>`:""}
             <span class="tot tnum">${totalLabel(e.total)}</span>
+            ${!e.cancelled?`<button class="btn danger sm" data-cancel="${esc(e.id)}">取消</button>`:""}
           </div>
           <div class="hist-body">${
             e.items.map(i=>`<div class="hist-line"><span>${esc(i.name)} <span style="color:var(--faint);font-size:12px">${esc(i.supplier||i.unit||"")}</span></span><span class="q">× ${i.qty}${i.price>0?" ＝ "+yen(i.price*i.qty):""}</span></div>`).join("")
@@ -1349,13 +1420,14 @@
         </div>`).join("")
       }</div>`;
     $("#csvBtn").addEventListener("click", downloadCSV);
+    $$("[data-cancel]").forEach(b=> b.addEventListener("click", ()=>cancelOrder(b.dataset.cancel)));
   }
 
   function downloadCSV(){
     const h = historyList();
-    const rows = [["発注日時","店舗","担当者","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計"]];
+    const rows = [["発注日時","店舗","担当者","状態","商品名","購入先","規格・メモ","発注単位","数量","参考単価","小計"]];
     h.forEach(e=>{ e.items.forEach(i=>{
-      rows.push([fmtDate(e.date), store().name, e.staff||"", i.name, i.supplier||"", i.spec||"", i.unit||"", i.qty, i.price, i.price*i.qty]);
+      rows.push([fmtDate(e.date), store().name, e.staff||"", e.cancelled?"取消済み":"", i.name, i.supplier||"", i.spec||"", i.unit||"", i.qty, i.price, i.price*i.qty]);
     }); });
     const csv = "﻿" + rows.map(r=> r.map(c=>{
       const v = String(c); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
@@ -1369,11 +1441,36 @@
     toast("CSVをダウンロードしました");
   }
 
-  /* ----- Stock check (在庫確認ウォークスルー) ----- */
+  /* ----- Stock check (在庫確認ウォークスルー) -----
+     進み具合と回答は店舗ごとに保存され、途中で閉じても続きから再開できます。
+     同じ商品に答え直すと前の回答は上書き（カートも調整）され、二重追加になりません。 */
   let stockIndex = 0;
-  let stockOrdered = [];   // [{productId, qty}]
-  let stockOkCount = 0;
   let stockOrderOpen = false;
+
+  function stockSess(){
+    state.stockSess ||= {};
+    return (state.stockSess[state.currentStore] ||= { index:0, actions:{} });
+  }
+  function stockOrderedList(){
+    return Object.entries(stockSess().actions)
+      .filter(([,a])=>a.type==="order")
+      .map(([pid,a])=>({ p: product(pid), qty:a.qty }))
+      .filter(x=>x.p);
+  }
+  function stockOkCountNow(){
+    return Object.values(stockSess().actions).filter(a=>a.type==="ok").length;
+  }
+  // 回答を記録。前回この商品を「発注」にしていた場合はカートから旧数量を引いてから反映する
+  function setStockAction(p, type, qty){
+    const s = stockSess();
+    const old = s.actions[p.id];
+    if(old && old.type==="order"){
+      setQty(p.id, Math.max(0, cartQty(p.id) - old.qty));
+    }
+    if(type==="order") addToCart(p.id, qty);
+    s.actions[p.id] = { type, qty: type==="order" ? qty : 0 };
+    save(); updateCartBadge();
+  }
 
   function amazonUrl(p){
     return (p.url && p.url.trim())
@@ -1382,7 +1479,19 @@
   }
 
   function enterStock(){
-    stockIndex = 0; stockOrdered = []; stockOkCount = 0; stockOrderOpen = false;
+    stockOrderOpen = false;
+    const s = stockSess();
+    const total = scopedProducts().length;
+    if(s.index > total) s.index = total;
+    stockIndex = s.index;
+    if(stockIndex > 0 && stockIndex < total){
+      toast(`前回の続き（${stockIndex+1}件目）から再開します`);
+    }
+    renderStock();
+  }
+  function restartStock(){
+    stockSess().index = 0; save();
+    stockIndex = 0; stockOrderOpen = false;
     renderStock();
   }
 
@@ -1401,6 +1510,7 @@
 
     const p = products[stockIndex];
     const oi = orderInfo(p);
+    const act = stockSess().actions[p.id];
     const total = products.length;
     const pct = Math.round((stockIndex / total) * 100);
     view.innerHTML = `
@@ -1418,6 +1528,7 @@
             <div class="fact"><span class="fk">発注単位</span><span class="fv">${esc(p.unit||"—")}</span></div>
             <div class="fact"><span class="fk">参考単価</span><span class="fv">${priceLabel(p)}</span></div>
           </div>
+          ${act?`<div class="s-prev">前回の回答: ${act.type==="ok"?"在庫OK ✓":"発注 × "+act.qty}（押し直すと上書きされます）</div>`:""}
           <div class="s-q">この備品の在庫は足りていますか？</div>
           <div class="s-actions" id="stockActions">
             <button class="big-btn ok" id="btnOk">
@@ -1433,7 +1544,7 @@
             <div class="lead">発注する数量を入力してください</div>
             <div class="qty-big">
               <button type="button" id="qDec" aria-label="減らす">−</button>
-              <input id="qInput" type="number" min="1" value="1" inputmode="numeric" aria-label="発注数量" />
+              <input id="qInput" type="number" min="1" value="${act&&act.type==="order"?act.qty:1}" inputmode="numeric" aria-label="発注数量" />
               <button type="button" id="qInc" aria-label="増やす">＋</button>
             </div>
             <div class="subt">${p.unit?esc(p.unit)+" 単位 ・ ":""}小計 <b id="qSub">${priceLabel(p)}</b></div>
@@ -1454,15 +1565,15 @@
         </div>
       </div>`;
 
-    $("#btnOk").addEventListener("click", ()=>{ stockOkCount++; nextStock(); });
+    $("#btnOk").addEventListener("click", ()=>{ setStockAction(p, "ok"); nextStock(); });
     $("#btnOrder").addEventListener("click", ()=>{
       stockOrderOpen = true;
       $("#orderPanel").classList.remove("hide");
       $("#stockActions").classList.add("hide");
       const qi = $("#qInput"); qi.focus(); qi.select();
     });
-    $("#btnPrev").addEventListener("click", ()=>{ if(stockIndex>0){ stockIndex--; renderStock(); } });
-    $("#btnRestart").addEventListener("click", enterStock);
+    $("#btnPrev").addEventListener("click", ()=>{ if(stockIndex>0){ stockIndex--; stockSess().index = stockIndex; save(); renderStock(); } });
+    $("#btnRestart").addEventListener("click", restartStock);
 
     // quantity panel
     const qInput = $("#qInput");
@@ -1474,9 +1585,12 @@
 
     const commitOrder = (openExternal)=>{
       const qty = clampQty();
-      addToCart(p.id, qty);
-      stockOrdered.push({ productId:p.id, qty });
-      updateCartBadge();
+      // 直近に他の人が発注していないか確認（重複発注の防止）
+      const dup = recentOrderInfo(p.name);
+      if(dup && !(act && act.type==="order")){
+        if(!confirm(`⚠️ 「${p.name}」は ${fmtDate(dup.date)} に ${dup.staff} さんが ${dup.qty} 発注済みです。\nさらに ${qty} 発注しますか？`)) return;
+      }
+      setStockAction(p, "order", qty);
       if(openExternal && oi.url) window.open(oi.url, "_blank", "noopener");
       toast(`「${p.name}」を ${qty} 発注リストに追加`);
       nextStock();
@@ -1486,10 +1600,16 @@
     $("#btnCartOnly").addEventListener("click", ()=>commitOrder(false));
   }
 
-  function nextStock(){ stockIndex++; stockOrderOpen=false; renderStock(); }
+  function nextStock(){
+    stockIndex++;
+    stockSess().index = stockIndex; save();
+    stockOrderOpen = false;
+    renderStock();
+  }
 
   function renderStockDone(){
-    const ordered = stockOrdered.map(o=>({ p:product(o.productId), qty:o.qty })).filter(x=>x.p);
+    const ordered = stockOrderedList();
+    const stockOkCount = stockOkCountNow();
     const orderTotal = ordered.reduce((s,x)=>s + x.p.price*x.qty, 0);
     const amznReady = ordered.filter(x=>canAmazonCart(x.p)).length;
     view.innerHTML = `
@@ -1522,10 +1642,16 @@
     const amz = $("#doneAmazon");
     if(amz) amz.addEventListener("click", ()=>openAmazonCart());
     const fin = $("#doneFinalize");
-    if(fin) fin.addEventListener("click", ()=>{ const msg = finalizeOrder(); toast("発注を確定しました"); pushChat("bot", msg); setView("history"); });
+    if(fin) fin.addEventListener("click", ()=>{
+      const r = finalizeOrder();
+      if(!r.ok){ alert(r.msg); return; }
+      if(state.stockSess) delete state.stockSess[state.currentStore]; // 済んだ確認セッションは片付ける
+      save();
+      toast("発注を確定しました"); pushChat("bot", r.msg); setView("history");
+    });
     const dc = $("#doneCart");
     if(dc) dc.addEventListener("click", ()=>setView("chat"));
-    $("#doneRestart").addEventListener("click", enterStock);
+    $("#doneRestart").addEventListener("click", restartStock);
   }
 
   /* ----- Product modal ----- */

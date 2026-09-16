@@ -1,21 +1,36 @@
 // =============================================================
-// そなえ｜発注履歴の共有（Google Apps Script）
+// そなえ｜発注履歴の共有（Google Apps Script）v2
 // -------------------------------------------------------------
-// このコードをスプレッドシートの Apps Script に貼り付けて
-// 「ウェブアプリ」として公開すると、アプリの発注が
-// このスプレッドシートに自動記録され、全端末で履歴を共有できます。
-// 貼り付け先・公開手順は「スプレッドシート共有手順.md」を見てください。
+// v2: 発注の「取消」に対応（記録は消さず、取消済みの印を付けます）
+//
+// 【更新のしかた（すでに設定済みの人）】
+//  1. スプレッドシート →「拡張機能」→「Apps Script」
+//  2. 中身を全部消して、このファイルの全文を貼り付け → 💾保存
+//  3. 「デプロイ」→「デプロイを管理」→ ✏（編集）→
+//     バージョン「新バージョン」→「デプロイ」
+//     ※URLは変わらないので、アプリ側の変更は不要です
 // =============================================================
 
 var SHEET_NAME = "発注履歴";
+var CANCEL_MARK = "【取消】";
 
-// 発注の受け取り（アプリ→シートに追記）
+// 発注・取消の受け取り（アプリ→シートに追記）
 function doPost(e) {
   var lock = LockService.getScriptLock();
   lock.tryLock(5000);
   try {
     var data = JSON.parse(e.postData.contents);
     var sh = getSheet_();
+
+    // 取消：記録は残したまま「取消行」を追記する
+    if (data.action === "cancel") {
+      sh.appendRow([
+        new Date().toISOString(), data.id || "", data.store || "", "",
+        data.staff || "", CANCEL_MARK, "", "", "", 0, 0, 0, 0
+      ]);
+      return json_({ ok: true });
+    }
+
     var items = data.items || [];
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
@@ -50,11 +65,14 @@ function doGet(e) {
     var sh = getSheet_();
     var rows = sh.getDataRange().getValues(); // 1行目はヘッダー
     var orders = {};
+    var cancelled = {};
     for (var i = 1; i < rows.length; i++) {
       var r = rows[i];
       var date = r[0], id = r[1], st = r[2], storeName = r[3], staff = r[4];
+      var name = String(r[5]);
       if (store && String(st) !== store) continue;
       if (!id) continue;
+      if (name === CANCEL_MARK) { cancelled[String(id)] = true; continue; }
       if (!orders[id]) {
         orders[id] = {
           id: String(id),
@@ -64,11 +82,15 @@ function doGet(e) {
         };
       }
       orders[id].items.push({
-        name: String(r[5]), supplier: String(r[6]), spec: String(r[7]),
+        name: name, supplier: String(r[6]), spec: String(r[7]),
         unit: String(r[8]), qty: Number(r[9]) || 0, price: Number(r[10]) || 0
       });
     }
-    var list = Object.keys(orders).map(function (k) { return orders[k]; });
+    var list = Object.keys(orders).map(function (k) {
+      var o = orders[k];
+      if (cancelled[o.id]) o.cancelled = true;
+      return o;
+    });
     return json_({ ok: true, orders: list });
   } catch (err) {
     return json_({ ok: false, error: String(err), orders: [] });
