@@ -605,6 +605,13 @@
   */
   const FIREBASE_CONFIG = null;
 
+  /* ========= Googleスプレッドシート共有（一番かんたん・推奨） =========
+     Google Apps Script のウェブアプリURLを貼ると、発注履歴が
+     全端末で共有され、スプレッドシートにも自動記録されます。
+     設定手順は「スプレッドシート共有手順.md」参照。
+     例: "https://script.google.com/macros/s/XXXX/exec" */
+  const GAS_ENDPOINT = "";
+
   /* ========= State & persistence ========= */
   const STORAGE_KEY = "sonae_v5";
   let _uidc = 0;
@@ -776,6 +783,14 @@
           .catch(()=>toast("共有DBへの保存に失敗（端末には保存済み）"));
       }catch(e){}
     }
+    if(GAS_ENDPOINT){
+      try{
+        // text/plain で送るとCORSプリフライトなしでGASに届く
+        fetch(GAS_ENDPOINT, { method:"POST", headers:{"Content-Type":"text/plain"}, body: JSON.stringify(doc) })
+          .then(()=>fetchGasOrders())
+          .catch(()=>toast("スプレッドシートへの保存に失敗（端末には保存済み）"));
+      }catch(e){}
+    }
   }
   /* ---- Claude共有DB（claude.aiアーティファクトで開いた時のみ有効） ----
      Firebase不要。claude.ai上でこのページを開くと自動で接続し、
@@ -805,8 +820,34 @@
       }, ()=>{ setCloudStatus("共有DB: 読取エラー"); });
   }
 
+  /* ---- Googleスプレッドシート共有（GAS_ENDPOINT 設定時のみ有効） ---- */
+  let gasOrders = null;   // 現在店舗の共有履歴（シート由来）
+  let gasTimer = null;
+  function initGas(){
+    if(!GAS_ENDPOINT) return;
+    setCloudStatus("共有DB: シート接続中…");
+    fetchGasOrders();
+    gasTimer = setInterval(fetchGasOrders, 30000); // 30秒ごとに更新
+  }
+  async function fetchGasOrders(){
+    if(!GAS_ENDPOINT) return;
+    try{
+      const r = await fetch(GAS_ENDPOINT + "?store=" + encodeURIComponent(state.currentStore));
+      const j = await r.json();
+      if(j && Array.isArray(j.orders)){
+        gasOrders = j.orders.sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")));
+        setCloudStatus("共有DB: スプレッドシート接続済み ●");
+        if(activeView==="history") renderHistory();
+      }
+    }catch(e){ setCloudStatus("共有DB: シート接続エラー"); }
+  }
+
   // 履歴の参照元：共有DBがあればそちら、なければ端末内
-  function historyList(){ return ((fdb||cdb) && cloudOrders) ? cloudOrders : history(); }
+  function historyList(){
+    if((fdb||cdb) && cloudOrders) return cloudOrders;
+    if(GAS_ENDPOINT && gasOrders) return gasOrders;
+    return history();
+  }
 
   /* ========= Helpers ========= */
   const $ = (sel, el=document) => el.querySelector(sel);
@@ -1551,6 +1592,7 @@
     pendingQueue = []; // 店舗をまたぐ確認待ちは破棄
     subscribeCloudOrders(); // 共有履歴を新店舗に切替
     subscribeClaudeOrders();
+    gasOrders = null; fetchGasOrders();
     renderStoreSelect(); updateCartBadge(); setView(activeView);
   });
   const staffInput = $("#staffName");
@@ -1574,6 +1616,7 @@
   setView("chat");
   initFirebase();
   initClaudeDb();
+  initGas();
 })();
 </script>
 
